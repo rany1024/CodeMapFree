@@ -236,8 +236,9 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com; connect-src 'none';">
     <title>CodeMapFree</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-theme">
     <style>
         * {
             margin: 0;
@@ -448,6 +449,29 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             white-space: pre;
         }
 
+        .code-line-content span {
+            white-space: pre;
+        }
+
+        /* highlight.js 样式覆盖，确保在代码块中正确显示 */
+        .code-block-content .hljs {
+            background: transparent;
+            padding: 0;
+            display: inline;
+        }
+
+        .code-block-content .hljs-keyword,
+        .code-block-content .hljs-selector-tag,
+        .code-block-content .hljs-literal,
+        .code-block-content .hljs-title,
+        .code-block-content .hljs-section,
+        .code-block-content .hljs-doctag,
+        .code-block-content .hljs-type,
+        .code-block-content .hljs-name,
+        .code-block-content .hljs-strong {
+            font-weight: normal;
+        }
+
 
         .arrow-layer {
             position: absolute;
@@ -566,6 +590,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
     </div>
     <div class="cmf-menu" id="cmfMenu"></div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const canvas = document.getElementById('canvas');
@@ -1737,15 +1762,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     break;
                 case 'codeContent':
                     if (codeBlocks[message.id]) {
-                        // 缓存原始代码，供“复制整个代码块内容”使用
+                        // 缓存原始代码，供"复制整个代码块内容"使用
                         codeBlocks[message.id].rawCode = message.code || '';
                         const code = message.code;
-                        const lines = code.split('\\n');
-                        const codeHtml = lines.map((line, i) => {
-                            const lineNum = codeBlocks[message.id].data.start_line + i;
-                            // 给 code-line-content 打上 data-line，便于精确定位到“真实行居中”
-                            return \`<div class="code-line"><span class="code-line-number">\${lineNum}</span><span class="code-line-content" data-line="\${lineNum}">\${escapeHtml(line || ' ')}</span></div>\`;
-                        }).join('');
+                        const blockData = codeBlocks[message.id].data;
+                        const language = detectLanguage(blockData.path);
+                        const codeHtml = highlightCode(code, language, blockData.start_line);
                         codeBlocks[message.id].content.innerHTML = codeHtml;
                     }
                     break;
@@ -1756,6 +1778,90 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // 根据文件路径确定语言类型
+        function detectLanguage(filePath) {
+            if (!filePath) return null;
+            const ext = filePath.split('.').pop()?.toLowerCase();
+            const langMap = {
+                'js': 'javascript',
+                'jsx': 'javascript',
+                'ts': 'typescript',
+                'tsx': 'typescript',
+                'py': 'python',
+                'java': 'java',
+                'c': 'c',
+                'cpp': 'cpp',
+                'cc': 'cpp',
+                'cxx': 'cpp',
+                'h': 'c',
+                'hpp': 'cpp',
+                'cs': 'csharp',
+                'php': 'php',
+                'rb': 'ruby',
+                'go': 'go',
+                'rs': 'rust',
+                'swift': 'swift',
+                'kt': 'kotlin',
+                'scala': 'scala',
+                'sh': 'bash',
+                'bash': 'bash',
+                'zsh': 'bash',
+                'ps1': 'powershell',
+                'sql': 'sql',
+                'html': 'html',
+                'htm': 'html',
+                'xml': 'xml',
+                'css': 'css',
+                'scss': 'scss',
+                'sass': 'sass',
+                'less': 'less',
+                'json': 'json',
+                'yaml': 'yaml',
+                'yml': 'yaml',
+                'md': 'markdown',
+                'markdown': 'markdown',
+                'vue': 'xml',
+                'jsx': 'javascript',
+                'tsx': 'typescript'
+            };
+            return langMap[ext] || null;
+        }
+
+        // 使用 highlight.js 高亮代码并保持行号
+        function highlightCode(code, language, startLine) {
+            if (!code || !code.trim()) {
+                return '<div class="code-line"><span class="code-line-number"></span><span class="code-line-content" data-line="' + startLine + '"> </span></div>';
+            }
+
+            let highlightedCode = '';
+            // 检查 highlight.js 是否已加载
+            if (language && typeof window !== 'undefined' && window.hljs && typeof window.hljs.highlight === 'function') {
+                try {
+                    // 检查语言是否支持
+                    if (window.hljs.getLanguage(language)) {
+                        const result = window.hljs.highlight(code, { language: language });
+                        highlightedCode = result.value;
+                    } else {
+                        // 语言不支持，尝试自动检测
+                        const result = window.hljs.highlightAuto(code);
+                        highlightedCode = result.value;
+                    }
+                } catch (e) {
+                    // 高亮失败，使用转义的纯文本
+                    highlightedCode = escapeHtml(code);
+                }
+            } else {
+                // highlight.js 未加载，使用转义的纯文本
+                highlightedCode = escapeHtml(code);
+            }
+
+            const lines = highlightedCode.split('\\n');
+            return lines.map((line, i) => {
+                const lineNum = startLine + i;
+                return \`<div class="code-line"><span class="code-line-number">\${lineNum}</span><span class="code-line-content" data-line="\${lineNum}">\${line || ' '}</span></div>\`;
+            }).join('');
         }
 
         // 初始化
