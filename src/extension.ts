@@ -1613,6 +1613,17 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             });
         }
 
+        // 箭头重绘调度：避免在 codeContent 批量到达时频繁重算，同时保证“异步加载代码内容后”一定重绘
+        let arrowsRedrawScheduled = false;
+        function scheduleUpdateArrows() {
+            if (arrowsRedrawScheduled) return;
+            arrowsRedrawScheduled = true;
+            requestAnimationFrame(() => {
+                arrowsRedrawScheduled = false;
+                updateArrows();
+            });
+        }
+
         // 重命名代码块
         function renameBlock(oldName, newName) {
             if (codeMapData.codeMap[newName]) {
@@ -1769,6 +1780,9 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                         const language = detectLanguage(blockData.path);
                         const codeHtml = highlightCode(code, language, blockData.start_line);
                         codeBlocks[message.id].content.innerHTML = codeHtml;
+                        // 关键：undo/redo 会先重建块，再异步返回 codeContent；
+                        // 若不在这里重绘，箭头会因为“锚点行 DOM 尚未存在”而消失，直到下一次交互触发 updateArrows
+                        scheduleUpdateArrows();
                     }
                     break;
             }
