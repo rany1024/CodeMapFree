@@ -1,0 +1,49 @@
+{
+  "name": "codemapfree",
+  "displayName": "CodeMapFree",
+  "description": "代码地图可视化工具",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:codemapfree.addToMap",
+    "onCommand:codemapfree.openMap"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codemapfree.addToMap",
+        "title": "添加到CodeMapFree"
+      },
+      {
+        "command": "codemapfree.openMap",
+        "title": "打开CodeMapFree",
+        "icon": "$(map)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codemapfree.addToMap",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "typescript": "^4.9.4"
+  }
+}
