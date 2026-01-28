@@ -3,11 +3,21 @@
   "displayName": "CodeMapFree",
   "description": "代码地图可视化工具",
   "version": "0.0.1",
+  "publisher": "rany1024",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/你的GitHub用户名/你的仓库名.git"
+  },
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "code map",
+    "visualization",
+    "codemapfree"
   ],
   "activationEvents": [
     "onCommand:codemapfree.addToMap",
@@ -29,9 +39,13 @@
     "menus": {
       "editor/context": [
         {
+          "command": "codemapfree.openMap",
+          "group": "navigation@0"
+        },
+        {
           "command": "codemapfree.addToMap",
           "when": "editorHasSelection",
-          "group": "navigation"
+          "group": "navigation@1"
         }
       ]
     }
