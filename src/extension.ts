@@ -207,7 +207,8 @@ export function activate(context: vscode.ExtensionContext) {
         setTimeout(() => {
             currentPanel?.webview.postMessage({
                 command: 'update',
-                data: data
+                data: data,
+                newBlockName: blockName // 标记新添加的代码块名称
             });
         }, 500);
     });
@@ -655,6 +656,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         const CODE_PADDING_X = 10; // .code-block-content padding
         const LINE_NUM_GUTTER_W = 50; // .code-line-number width (CSS)
         const LINE_NUM_GAP_W = 10; // .code-line-number margin-right (CSS)
+        const HEADER_HEIGHT = 30; // .code-block-header height (approximate)
+        const BORDER_WIDTH = 2; // .code-block border width
+        const CODE_FONT_SIZE = 13; // font-size in .code-block-content
+
+        // 跟踪新添加的代码块（用于自动调整尺寸）
+        let pendingAutoSizeBlock = null;
 
         // Resize state
         let isResizing = false;
@@ -2396,6 +2403,13 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     codeMapData = message.data;
                     arrows = message.data.arrows || [];
                     loadCodeBlocks();
+
+                    // 如果有新代码块，标记为待自动调整尺寸
+                    if (message.newBlockName && codeBlocks[message.newBlockName]) {
+                        pendingAutoSizeBlock = message.newBlockName;
+                        // 尺寸将在codeContent消息中计算并应用
+                    }
+
                     // 外部新增/更新也纳入历史（并清空 redo）
                     recordSnapshot();
                     break;
@@ -2408,8 +2422,56 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                         const language = detectLanguage(blockData.path);
                         const codeHtml = highlightCode(code, language, blockData.start_line);
                         codeBlocks[message.id].content.innerHTML = codeHtml;
+
+                        // 如果是新代码块，计算并应用最佳尺寸
+                        if (pendingAutoSizeBlock === message.id) {
+                            const block = codeBlocks[message.id];
+
+                            // 等待DOM完全渲染后再计算尺寸（使用requestAnimationFrame确保渲染完成）
+                            requestAnimationFrame(() => {
+                                const optimalSize = calculateOptimalBlockSize(code, block.element, block.content);
+
+                                // 更新代码块尺寸
+                                block.element.style.width = optimalSize.width + 'px';
+                                block.element.style.height = optimalSize.height + 'px';
+                                block.data.w = optimalSize.width;
+                                block.data.h = optimalSize.height;
+
+                                // 计算画布中心位置（考虑滚动）
+                                const canvasRect = canvas.getBoundingClientRect();
+                                const centerX = canvas.scrollLeft + canvasRect.width / 2;
+                                const centerY = canvas.scrollTop + canvasRect.height / 2;
+
+                                // 计算代码块左上角位置（居中）
+                                const blockX = Math.max(0, centerX - optimalSize.width / 2);
+                                const blockY = Math.max(0, centerY - optimalSize.height / 2);
+
+                                // 更新代码块位置
+                                block.element.style.left = blockX + 'px';
+                                block.element.style.top = blockY + 'px';
+                                block.data.x = blockX;
+                                block.data.y = blockY;
+
+                                // 选中新代码块（清除箭头选中状态）
+                                if (selectedArrowIndex !== -1) {
+                                    clearArrowSelection();
+                                }
+                                setSelectedBlock(message.id);
+
+                                // 清除待处理标记
+                                pendingAutoSizeBlock = null;
+
+                                // 更新画布尺寸和箭头
+                                updateCanvasSize();
+                                updateArrows();
+
+                                // 保存位置和尺寸变更
+                                saveData();
+                            });
+                        }
+
                         // 关键：undo/redo 会先重建块，再异步返回 codeContent；
-                        // 若不在这里重绘，箭头会因为“锚点行 DOM 尚未存在”而消失，直到下一次交互触发 updateArrows
+                        // 若不在这里重绘，箭头会因为"锚点行 DOM 尚未存在"而消失，直到下一次交互触发 updateArrows
                         scheduleUpdateArrows();
                     }
                     break;
@@ -2504,6 +2566,92 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 const lineNum = startLine + i;
                 return \`<div class="code-line"><span class="code-line-number">\${lineNum}</span><span class="code-line-content" data-line="\${lineNum}">\${line || ' '}</span></div>\`;
             }).join('');
+        }
+
+        // 计算代码块的最佳尺寸（根据内容自动适配）
+        function calculateOptimalBlockSize(code, blockElement, contentElement) {
+            if (!code || !blockElement || !contentElement) {
+                return { width: 400, height: 300 };
+            }
+
+            const lines = code.split('\\n');
+            const lineCount = lines.length;
+
+            // 使用实际渲染后的DOM元素来测量宽度（更准确）
+            // contentElement已经包含了渲染后的代码行
+            let maxLineWidth = 0;
+            const lineContentElements = contentElement.querySelectorAll('.code-line-content');
+
+            if (lineContentElements.length > 0) {
+                // 使用实际渲染后的元素测量
+                lineContentElements.forEach(lineEl => {
+                    // 临时设置为不换行，测量实际宽度
+                    const originalWhiteSpace = lineEl.style.whiteSpace;
+                    lineEl.style.whiteSpace = 'pre';
+                    const width = lineEl.scrollWidth;
+                    lineEl.style.whiteSpace = originalWhiteSpace;
+                    if (width > maxLineWidth) {
+                        maxLineWidth = width;
+                    }
+                });
+            } else {
+                // 如果DOM还未渲染，使用文本测量
+                const measureEl = document.createElement('span');
+                measureEl.style.position = 'absolute';
+                measureEl.style.visibility = 'hidden';
+                measureEl.style.whiteSpace = 'pre';
+                measureEl.style.fontFamily = 'Consolas, Monaco, monospace';
+                measureEl.style.fontSize = CODE_FONT_SIZE + 'px';
+                measureEl.style.padding = '0';
+                measureEl.style.margin = '0';
+                document.body.appendChild(measureEl);
+
+                lines.forEach(line => {
+                    // 移除HTML标签，获取纯文本
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = line || ' ';
+                    const textContent = tempDiv.textContent || tempDiv.innerText || '';
+                    measureEl.textContent = textContent || ' ';
+                    const width = measureEl.offsetWidth;
+                    if (width > maxLineWidth) {
+                        maxLineWidth = width;
+                    }
+                });
+
+                document.body.removeChild(measureEl);
+            }
+
+            // 计算内容区域宽度
+            // 宽度 = 行号宽度 + 行号间距 + 内容宽度 + 左右padding
+            const contentWidth = maxLineWidth;
+            const totalContentWidth = LINE_NUM_GUTTER_W + LINE_NUM_GAP_W + contentWidth + CODE_PADDING_X * 2;
+
+            // 计算总宽度（包括边框）
+            let blockWidth = totalContentWidth + BORDER_WIDTH * 2;
+
+            // 限制最大宽度为窗口的1/2
+            const maxWidth = window.innerWidth / 2;
+            if (blockWidth > maxWidth) {
+                blockWidth = maxWidth;
+            }
+
+            // 确保不小于最小宽度
+            const minWidth = MIN_W;
+            if (blockWidth < minWidth) {
+                blockWidth = minWidth;
+            }
+
+            // 计算高度
+            // 高度 = 标题栏 + 内容高度 + 上下padding + 边框
+            const contentHeight = lineCount * LINE_HEIGHT;
+            const totalContentHeight = contentHeight + CODE_PADDING_X * 2;
+            const blockHeight = HEADER_HEIGHT + totalContentHeight + BORDER_WIDTH * 2;
+
+            // 确保不小于最小高度
+            const minHeight = MIN_H;
+            const finalHeight = Math.max(blockHeight, minHeight);
+
+            return { width: Math.ceil(blockWidth), height: Math.ceil(finalHeight) };
         }
 
         // 初始化
