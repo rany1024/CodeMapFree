@@ -16,9 +16,11 @@ interface CodeMapData {
     page_name: string;
     codeMap: { [key: string]: CodeBlock };
     arrows?: Array<{
-        from: { block: string; line: number; col?: number };
-        to: { block: string; line: number; col?: number };
+        // 使用 x/y 表示“相对代码块内容区域左上角”的偏移（不再使用行号/列号）
+        from: { block: string; x: number; y: number };
+        to: { block: string; x: number; y: number };
         color?: string; // 箭头颜色，默认为主题色
+        alpha?: number; // 箭头透明度，0~1，默认 1
     }>;
 }
 
@@ -499,6 +501,11 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             pointer-events: stroke;
             cursor: pointer;
         }
+        /* 预览箭头不接收鼠标事件 */
+        .arrow-layer line[data-is-preview="true"] {
+            pointer-events: none;
+            cursor: default;
+        }
         .arrow-layer circle {
             pointer-events: all;
             cursor: pointer;
@@ -571,6 +578,11 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             z-index: 1;
             position: relative;
         }
+
+        .arrow-alpha-input {
+            width: 80px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -581,6 +593,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
     <div class="arrow-color-picker" id="arrowColorPicker">
         <span class="arrow-color-label">箭头颜色</span>
         <input type="color" class="arrow-color-input" id="arrowColorInput" value="#007acc">
+        <input type="range" class="arrow-alpha-input" id="arrowAlphaInput" min="0.2" max="1" step="0.05" value="1" title="透明度 (20% - 100%)">
         <div class="arrow-color-presets">
             <div class="arrow-color-preset" data-color="#007acc" style="background: #007acc;" title="蓝色"></div>
             <div class="arrow-color-preset" data-color="#ff6b6b" style="background: #ff6b6b;" title="红色"></div>
@@ -622,6 +635,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         const arrowTool = document.getElementById('arrowTool');
         const arrowColorPicker = document.getElementById('arrowColorPicker');
         const arrowColorInput = document.getElementById('arrowColorInput');
+        const arrowAlphaInput = document.getElementById('arrowAlphaInput');
         const pageName = document.getElementById('pageName');
         const cmfMenu = document.getElementById('cmfMenu');
 
@@ -635,6 +649,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         let currentArrow = null;
         let arrows = codeMapData.arrows || [];
         let currentArrowColor = '#007acc'; // 默认颜色
+        let currentArrowAlpha = 1; // 默认不透明
         const LINE_HEIGHT = 19.5;
         const CODE_PADDING_X = 10; // .code-block-content padding
         const LINE_NUM_GUTTER_W = 50; // .code-line-number width (CSS)
@@ -880,9 +895,28 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') hideMenu();
             if (e.key === 'Escape') {
-                // ESC：退出端点编辑/取消选中箭头
+                // ESC：退出端点编辑/取消选中箭头，并退出箭头模式
                 if (editingArrowEndpoint || selectedArrowIndex !== -1) {
                     clearArrowSelection();
+                }
+                if (arrowMode) {
+                    arrowMode = false;
+                    arrowTool.classList.remove('active');
+                    arrowColorPicker.classList.remove('active');
+                    // 清理新箭头预览
+                    if (arrowStart) {
+                        if (currentArrow) {
+                            currentArrow.remove();
+                            currentArrow = null;
+                        }
+                        canvas.removeEventListener('mousemove', updateArrowPreview);
+                        arrowStart = null;
+                    }
+                    // 清理端点编辑预览
+                    editingArrowEndpoint = null;
+                    stopEndpointPreview();
+                    canvas.style.cursor = 'default';
+                    updateBlockInteractivity();
                 }
             }
         });
@@ -1022,25 +1056,13 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             updateBlockInteractivity();
         });
 
-        // 点击外部关闭颜色选择器
+        // 点击外部关闭颜色选择器（但不退出箭头模式）
         document.addEventListener('click', (e) => {
             if (arrowMode && arrowColorPicker.classList.contains('active')) {
                 // 如果点击的不是箭头按钮和颜色选择器内部
                 if (!arrowTool.contains(e.target) && !arrowColorPicker.contains(e.target)) {
-                    arrowMode = false;
-                    arrowTool.classList.remove('active');
+                    // 只关闭颜色选择器，不退出箭头模式
                     arrowColorPicker.classList.remove('active');
-                    canvas.style.cursor = 'default';
-                    // 清除起点选择和预览
-                    if (arrowStart) {
-                        if (currentArrow) {
-                            currentArrow.remove();
-                            currentArrow = null;
-                        }
-                        canvas.removeEventListener('mousemove', updateArrowPreview);
-                        arrowStart = null;
-                    }
-                    updateBlockInteractivity();
                 }
             }
         });
@@ -1056,6 +1078,25 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         // 颜色选择器事件
         arrowColorInput.addEventListener('input', (e) => {
             currentArrowColor = e.target.value;
+            // 若当前有选中箭头，则实时更新该箭头颜色
+            if (selectedArrowIndex !== -1 && arrows[selectedArrowIndex]) {
+                arrows[selectedArrowIndex].color = currentArrowColor;
+                updateArrows();
+                recordAndSave();
+            }
+        });
+
+        // 透明度滑条事件（20%~100%）
+        arrowAlphaInput.addEventListener('input', (e) => {
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v)) {
+                currentArrowAlpha = v;
+                if (selectedArrowIndex !== -1 && arrows[selectedArrowIndex]) {
+                    arrows[selectedArrowIndex].alpha = currentArrowAlpha;
+                    updateArrows();
+                    recordAndSave();
+                }
+            }
         });
 
         // 阻止颜色选择器内部点击事件冒泡
@@ -1069,6 +1110,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 const color = preset.dataset.color;
                 currentArrowColor = color;
                 arrowColorInput.value = color;
+                // 预设颜色同时作用于当前选中箭头
+                if (selectedArrowIndex !== -1 && arrows[selectedArrowIndex]) {
+                    arrows[selectedArrowIndex].color = currentArrowColor;
+                    updateArrows();
+                    recordAndSave();
+                }
             });
         });
 
@@ -1101,81 +1148,48 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         }
 
 
-        function clamp(n, min, max) {
-            return Math.max(min, Math.min(max, n));
-        }
-
-        // 估算当前代码字体的单字符宽度（等宽字体下更准）
-        function getCharWidth() {
-            const probe = document.createElement('span');
-            probe.style.position = 'fixed';
-            probe.style.left = '-9999px';
-            probe.style.top = '-9999px';
-            probe.style.whiteSpace = 'pre';
-            // 尽量继承代码内容字体
-            const sample = document.querySelector('.code-block-content');
-            if (sample) {
-                const cs = window.getComputedStyle(sample);
-                probe.style.fontFamily = cs.fontFamily;
-                probe.style.fontSize = cs.fontSize;
-                probe.style.fontWeight = cs.fontWeight;
-                probe.style.letterSpacing = cs.letterSpacing;
-            }
-            probe.textContent = 'MMMMMMMMMM'; // 10 个 M 平均
-            document.body.appendChild(probe);
-            const w = probe.getBoundingClientRect().width / 10;
-            probe.remove();
-            return w || 8;
-        }
-
-        const CHAR_W = getCharWidth();
-
-        function getAnchorPoint(blockName, line, col) {
+        /**
+         * 基于"代码块内容区域"的相对偏移计算在 canvas 中的锚点坐标。
+         * xOffset / yOffset：相对于 .code-block-content 的内容原点（scrollLeft/scrollTop 为 0 时的左上角）。
+         */
+        function getAnchorPoint(blockName, xOffset, yOffset) {
             const b = codeBlocks[blockName];
-            if (!b) return null;
+            if (!b || !b.content) return null;
+
             const canvasRect = canvas.getBoundingClientRect();
+            const contentEl = b.content;
+            const contentRect = contentEl.getBoundingClientRect();
 
-            // 通过 data-line 精确找到对应行的“代码文本元素”
-            const lineContentEl = b.content ? b.content.querySelector(\`.code-line-content[data-line="\${line}"]\`) : null;
-            if (!lineContentEl) return null;
+            // contentRect.left/top 是"当前可视区域左上角"；减去 scroll 才是内容原点
+            const originXInCanvas =
+                contentRect.left - canvasRect.left + canvas.scrollLeft - contentEl.scrollLeft;
+            const originYInCanvas =
+                contentRect.top - canvasRect.top + canvas.scrollTop - contentEl.scrollTop;
 
-            const lineEl = lineContentEl.closest('.code-line');
-            if (!lineEl) return null;
-
-            const lineRect = lineEl.getBoundingClientRect();
-            const contentRect = lineContentEl.getBoundingClientRect();
-
-            // Y：用真实行盒子的中心，确保“严格居中”
-            const y = (lineRect.top + lineRect.height / 2) - canvasRect.top + canvas.scrollTop;
-
-            // X：第J列的左边位置（从代码文本区域左边算起）
-            const safeCol = Math.max(1, (col || 1));
-            const x = (contentRect.left - canvasRect.left + canvas.scrollLeft) + (safeCol - 1) * CHAR_W;
-
+            const x = originXInCanvas + (xOffset || 0);
+            const y = originYInCanvas + (yOffset || 0);
             return { x, y };
-        }
-
-        function computeColFromClick(lineContentEl, clientX) {
-            const rect = lineContentEl.getBoundingClientRect();
-            const x = clientX - rect.left;
-            // col 从 1 开始；允许落到“行尾 + 1”
-            const raw = Math.floor(x / CHAR_W) + 1;
-            const text = lineContentEl.textContent || '';
-            return clamp(raw, 1, Math.max(1, text.length + 1));
-        }
-
-        function getLineInfoFromLineContent(lineContentEl) {
-            const lineEl = lineContentEl.closest('.code-line');
-            if (!lineEl) return null;
-            const numEl = lineEl.querySelector('.code-line-number');
-            const n = numEl ? parseInt((numEl.textContent || '').trim(), 10) : NaN;
-            if (Number.isNaN(n)) return null;
-            return { line: n };
         }
 
         function getBlockNameFromLineContent(lineContentEl) {
             const blockEl = lineContentEl.closest('.code-block');
             return blockEl ? blockEl.dataset.blockName : null;
+        }
+
+        /**
+         * 根据点击位置计算相对代码块内容区域的 x/y 偏移（不做字符/行对齐，完全跟随鼠标）。
+         */
+        function getOffsetsFromClick(lineContentEl, clientX, clientY) {
+            const blockContent = lineContentEl.closest('.code-block')?.querySelector('.code-block-content');
+            if (!blockContent) return null;
+
+            const contentRect = blockContent.getBoundingClientRect();
+
+            // X/Y：点击点相对"内容原点"的偏移 =（点击点相对可视区域的偏移）+ scroll
+            const xOffset = (clientX - contentRect.left) + blockContent.scrollLeft;
+            const yOffset = (clientY - contentRect.top) + blockContent.scrollTop;
+
+            return { xOffset, yOffset };
         }
 
         // 更新画布尺寸（根据代码块位置动态扩展）
@@ -1549,36 +1563,40 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         }
 
 
-        // 处理"代码文本点击"（单击模式：两次点击完成连接，并记录列 col）
-        function handleLineContentClick(lineContentEl, clientX) {
+        // 处理"代码文本点击"（两次点击完成连接，记录相对内容区域的 x/y 偏移）
+        function handleLineContentClick(lineContentEl, clientX, clientY) {
             const blockName = getBlockNameFromLineContent(lineContentEl);
-            const lineInfo = getLineInfoFromLineContent(lineContentEl);
-            if (!blockName || !lineInfo) return;
-            const col = computeColFromClick(lineContentEl, clientX);
+            if (!blockName) return;
+
+            const offsets = getOffsetsFromClick(lineContentEl, clientX, clientY);
+            if (!offsets) return;
+            const { xOffset, yOffset } = offsets;
 
             if (!arrowStart) {
-                // 第一次点击：选择起点，开始实时绘制箭头预览
+                // 第一次点击：记录起点偏移，开始实时绘制箭头预览
                 arrowStart = {
                     block: blockName,
-                    line: lineInfo.line,
-                    col,
-                    element: null,
+                    x: xOffset,
+                    y: yOffset,
                     blockElement: lineContentEl.closest('.code-block')
                 };
                 startArrowPreview();
                 return;
             }
 
-            // 不能选择同一个位置
-            if (arrowStart.block === blockName && arrowStart.line === lineInfo.line && (arrowStart.col || 1) === col) {
+            // 起点和终点完全相同就忽略
+            if (arrowStart.block === blockName &&
+                (arrowStart.x || 0) === xOffset &&
+                (arrowStart.y || 0) === yOffset) {
                 return;
             }
 
             // 第二次点击：完成箭头连接
             const arrow = {
-                from: { block: arrowStart.block, line: arrowStart.line, col: arrowStart.col || 1 },
-                to: { block: blockName, line: lineInfo.line, col },
-                color: currentArrowColor
+                from: { block: arrowStart.block, x: arrowStart.x, y: arrowStart.y },
+                to: { block: blockName, x: xOffset, y: yOffset },
+                color: currentArrowColor,
+                alpha: currentArrowAlpha
             };
             arrows.push(arrow);
 
@@ -1592,13 +1610,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             updateArrows();
             recordAndSave();
 
-            // 连接完成后自动退出箭头模式
-            arrowMode = false;
-            arrowTool.classList.remove('active');
-            arrowColorPicker.classList.remove('active');
-            canvas.style.cursor = 'default';
-            updateBlockInteractivity();
-
+            // 连接完成后保持在箭头模式，方便连续画多条箭头
             arrowStart = null;
         }
 
@@ -1606,7 +1618,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         function startArrowPreview() {
             if (!arrowStart) return;
 
-            const p = getAnchorPoint(arrowStart.block, arrowStart.line, arrowStart.col || 1);
+            const p = getAnchorPoint(arrowStart.block, arrowStart.x, arrowStart.y);
             if (!p) return;
             const fromX = p.x;
             const fromY = p.y;
@@ -1637,8 +1649,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             currentArrow.setAttribute('y2', fromY);
             currentArrow.setAttribute('stroke', currentArrowColor);
             currentArrow.setAttribute('stroke-width', '2');
+            currentArrow.setAttribute('stroke-opacity', String(currentArrowAlpha));
             currentArrow.setAttribute('marker-end', 'url(#' + markerId + ')');
-            currentArrow.setAttribute('opacity', '0.6'); // 预览时半透明
+            currentArrow.setAttribute('opacity', '0.6'); // 预览时整体半透明
+            // 预览箭头不接收鼠标事件，避免干扰代码块的点击
+            currentArrow.style.pointerEvents = 'none';
+            currentArrow.dataset.isPreview = 'true'; // 标识为预览箭头
 
             arrowLayer.appendChild(currentArrow);
 
@@ -1666,18 +1682,19 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 if (lineContentEl) {
                     e.stopPropagation();
                     const blockName = getBlockNameFromLineContent(lineContentEl);
-                    const lineInfo = getLineInfoFromLineContent(lineContentEl);
-                    if (!blockName || !lineInfo) return;
-                    const col = computeColFromClick(lineContentEl, e.clientX);
+                    if (!blockName) return;
+                    const offsets = getOffsetsFromClick(lineContentEl, e.clientX, e.clientY);
+                    if (!offsets) return;
+                    const { xOffset, yOffset } = offsets;
                     const { index, endpoint } = editingArrowEndpoint;
                     // 先退出编辑态再写盘
                     editingArrowEndpoint = null;
                     stopEndpointPreview();
                     canvas.style.cursor = 'default';
                     updateBlockInteractivity();
-                    updateArrowEndpointTo(index, endpoint, blockName, lineInfo.line, col);
+                    updateArrowEndpointTo(index, endpoint, blockName, xOffset, yOffset);
                 } else {
-                    // 点击空白：退出端点编辑，但保留“选中箭头”
+                    // 点击空白：退出端点编辑，但保留"选中箭头"
                     editingArrowEndpoint = null;
                     stopEndpointPreview();
                     canvas.style.cursor = 'default';
@@ -1701,18 +1718,15 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             // arrowMode：优先若点击了代码文本，作为选点
             if (lineContentEl) {
                 e.stopPropagation();
-                handleLineContentClick(lineContentEl, e.clientX);
+                handleLineContentClick(lineContentEl, e.clientX, e.clientY);
                 return;
             }
 
-            // 若点击的不是代码文本，则取消起点和预览
+            // arrowMode下，如果已经选择了起点，点击空白区域时忽略这次点击（不取消起点）
+            // 让用户可以继续点击直到找到正确的终点
             if (arrowStart) {
-                if (currentArrow) {
-                    currentArrow.remove();
-                    currentArrow = null;
-                }
-                canvas.removeEventListener('mousemove', updateArrowPreview);
-                arrowStart = null;
+                // 忽略这次点击，保持起点和预览状态
+                return;
             }
         });
 
@@ -1729,11 +1743,8 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 const toBlock = codeBlocks[arrow.to.block];
 
                 if (fromBlock && toBlock) {
-                    const fromCol = (arrow.from.col || 1);
-                    const toCol = (arrow.to.col || 1);
-
-                    const p1 = getAnchorPoint(arrow.from.block, arrow.from.line, fromCol);
-                    const p2 = getAnchorPoint(arrow.to.block, arrow.to.line, toCol);
+                    const p1 = getAnchorPoint(arrow.from.block, arrow.from.x, arrow.from.y);
+                    const p2 = getAnchorPoint(arrow.to.block, arrow.to.x, arrow.to.y);
                     if (!p1 || !p2) return;
                     const fromX = p1.x;
                     const fromY = p1.y;
@@ -1741,6 +1752,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     const toY = p2.y;
 
                     const arrowColor = arrow.color || '#007acc';
+                    const arrowAlpha = (typeof arrow.alpha === 'number') ? arrow.alpha : 1;
                     const markerId = 'arrowhead-' + arrowColor.replace('#', '');
 
                     // 确保标记存在
@@ -1767,10 +1779,11 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     line.setAttribute('y2', toY);
                     line.setAttribute('stroke', arrowColor);
                     line.setAttribute('stroke-width', (selectedArrowIndex === idx) ? '3' : '2');
+                    line.setAttribute('stroke-opacity', String(arrowAlpha));
                     line.setAttribute('marker-end', 'url(#' + markerId + ')');
                     line.dataset.arrowIndex = String(idx);
                     line.addEventListener('click', (e) => {
-                        if (arrowMode) return;
+                        // 箭头模式下也允许点击选中箭头进入可编辑状态
                         e.stopPropagation();
                         e.preventDefault();
                         selectArrow(idx);
@@ -1786,12 +1799,13 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                             c.setAttribute('cy', String(cy));
                             c.setAttribute('r', String(r));
                             c.setAttribute('fill', arrowColor);
+                            c.setAttribute('fill-opacity', String(arrowAlpha));
                             c.setAttribute('stroke', 'rgba(0,0,0,0.25)');
                             c.setAttribute('stroke-width', '1');
                             c.dataset.arrowIndex = String(idx);
                             c.dataset.endpoint = endpoint;
                             c.addEventListener('click', (e) => {
-                                if (arrowMode) return;
+                                // 箭头模式下也允许编辑端点
                                 e.stopPropagation();
                                 e.preventDefault();
                                 beginEditArrowEndpoint(idx, endpoint);
@@ -1866,18 +1880,18 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             // 固定端：编辑 from 时固定 to；编辑 to 时固定 from
             const fixed = endpoint === 'from'
-                ? getAnchorPoint(a.to.block, a.to.line, (a.to.col || 1))
-                : getAnchorPoint(a.from.block, a.from.line, (a.from.col || 1));
+                ? getAnchorPoint(a.to.block, a.to.x, a.to.y)
+                : getAnchorPoint(a.from.block, a.from.x, a.from.y);
             if (!fixed) return;
 
             const canvasRect = canvas.getBoundingClientRect();
-            // 若是“初始化调用”（clientX/Y=0），则先画成固定端到当前端，避免出现 0,0 飞线
+            // 若是"初始化调用"（clientX/Y=0），则先画成固定端到当前端，避免出现 0,0 飞线
             let x = e.clientX - canvasRect.left + canvas.scrollLeft;
             let y = e.clientY - canvasRect.top + canvas.scrollTop;
             if (!e.clientX && !e.clientY) {
                 const cur = endpoint === 'from'
-                    ? getAnchorPoint(a.from.block, a.from.line, (a.from.col || 1))
-                    : getAnchorPoint(a.to.block, a.to.line, (a.to.col || 1));
+                    ? getAnchorPoint(a.from.block, a.from.x, a.from.y)
+                    : getAnchorPoint(a.to.block, a.to.x, a.to.y);
                 if (cur) {
                     x = cur.x;
                     y = cur.y;
@@ -1934,6 +1948,26 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             if (index < 0 || index >= (arrows || []).length) return;
             selectedArrowIndex = index;
             editingArrowEndpoint = null;
+
+            // 选中箭头时，同步颜色/透明度到面板；若无 alpha 则默认为 1
+            const a = arrows[index];
+            if (a) {
+                if (a.color) {
+                    currentArrowColor = a.color;
+                    if (arrowColorInput) {
+                        arrowColorInput.value = a.color;
+                    }
+                } else {
+                    // 没有存颜色时，保持当前面板颜色
+                    a.color = currentArrowColor;
+                }
+                const alpha = (typeof a.alpha === 'number') ? a.alpha : 1;
+                currentArrowAlpha = alpha;
+                if (arrowAlphaInput) {
+                    arrowAlphaInput.value = String(alpha);
+                }
+            }
+
             scheduleUpdateArrows();
         }
 
@@ -1947,14 +1981,14 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             updateBlockInteractivity();
         }
 
-        function updateArrowEndpointTo(index, endpoint, block, line, col) {
+        function updateArrowEndpointTo(index, endpoint, block, xOffset, yOffset) {
             if (index < 0 || index >= (arrows || []).length) return;
             const a = arrows[index];
             if (!a) return;
             if (endpoint === 'from') {
-                a.from = { block, line, col };
+                a.from = { block, x: xOffset, y: yOffset };
             } else {
-                a.to = { block, line, col };
+                a.to = { block, x: xOffset, y: yOffset };
             }
             updateArrows();
             recordAndSave();
