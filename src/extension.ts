@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 interface CodeBlock {
+    name?: string; // 代码块显示名称，默认值等于id（codeMap中的key）
     path: string;
     start_line: number;
     end_line: number;
@@ -166,18 +167,17 @@ export function activate(context: vscode.ExtensionContext) {
         // 加载现有数据
         const data = loadCodeMap();
 
-        // 自动命名：查找“同一路径下、标题为纯数字”的最大值 + 1
+        // 自动命名：查找"所有代码块中、标题为纯数字"的最大值 + 1
         // 用户手动改名后大概率不是纯数字，因此不纳入计算
         const numericOnly = /^\d+$/;
         let maxNum = 0;
         for (const [title, block] of Object.entries(data.codeMap)) {
-            if (block.path !== filePath) continue;
             if (!numericOnly.test(title)) continue;
             const n = parseInt(title, 10);
             if (!Number.isNaN(n) && n > maxNum) maxNum = n;
         }
 
-        // 为避免不同文件“数字标题”冲突导致覆盖，这里做一次全局去重
+        // 生成新的id
         let nextNum = maxNum + 1;
         let blockName = String(nextNum);
         while (data.codeMap[blockName]) {
@@ -187,6 +187,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // 添加新代码块
         const newBlock: CodeBlock = {
+            name: blockName, // 默认name等于id
             path: filePath,
             start_line: startLine,
             end_line: endLine,
@@ -345,7 +346,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
         .code-block-header {
             background: var(--vscode-titleBar-activeBackground);
-            padding: 8px;
+            padding: 0px 8px;
             border-bottom: 1px solid var(--vscode-panel-border);
             cursor: move;
             user-select: none;
@@ -434,7 +435,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
         .code-block-content {
             padding: 10px;
-            height: calc(100% - 40px);
+            height: calc(100% - 30px);
             overflow: auto;
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 13px;
@@ -853,11 +854,191 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             recordAndSave();
         }
 
+        // 交换两个代码块的id
+        function swapBlockIds(id1, id2) {
+            if (!codeMapData.codeMap[id1] || !codeMapData.codeMap[id2] || id1 === id2) return;
+
+            const block1 = codeMapData.codeMap[id1];
+            const block2 = codeMapData.codeMap[id2];
+
+            // 交换codeMap中的位置
+            codeMapData.codeMap[id1] = block2;
+            codeMapData.codeMap[id2] = block1;
+
+            // 更新箭头中的引用
+            arrows.forEach(arrow => {
+                if (arrow.from.block === id1) {
+                    arrow.from.block = id2;
+                } else if (arrow.from.block === id2) {
+                    arrow.from.block = id1;
+                }
+                if (arrow.to.block === id1) {
+                    arrow.to.block = id2;
+                } else if (arrow.to.block === id2) {
+                    arrow.to.block = id1;
+                }
+            });
+
+            loadCodeBlocks();
+            recordAndSave();
+        }
+
+        // 获取所有数字id
+        function getNumericIds() {
+            const numericOnly = /^\\d+$/;
+            const ids = [];
+            Object.keys(codeMapData.codeMap).forEach(id => {
+                if (numericOnly.test(id)) {
+                    ids.push(parseInt(id, 10));
+                }
+            });
+            return ids.sort((a, b) => a - b);
+        }
+
+        // 上移一层：和id比自己大的最小对象交换id
+        function moveBlockUp(blockId) {
+            const numericOnly = /^\\d+$/;
+            if (!numericOnly.test(blockId)) return;
+            const currentId = parseInt(blockId, 10);
+            const numericIds = getNumericIds();
+            const nextId = numericIds.find(id => id > currentId);
+            if (nextId !== undefined) {
+                swapBlockIds(blockId, String(nextId));
+            }
+        }
+
+        // 下移一层：和id比自己小的最大对象交换id
+        function moveBlockDown(blockId) {
+            const numericOnly = /^\\d+$/;
+            if (!numericOnly.test(blockId)) return;
+            const currentId = parseInt(blockId, 10);
+            const numericIds = getNumericIds();
+            const prevId = numericIds.filter(id => id < currentId).pop();
+            if (prevId !== undefined) {
+                swapBlockIds(blockId, String(prevId));
+            }
+        }
+
+        // 移动到最上层：自己的id变成最大id，比自己大的所有id都-1
+        function moveBlockToTop(blockId) {
+            const numericOnly = /^\\d+$/;
+            if (!numericOnly.test(blockId)) return;
+            const currentId = parseInt(blockId, 10);
+            const numericIds = getNumericIds();
+            const maxId = numericIds[numericIds.length - 1];
+            if (currentId >= maxId) return; // 已经在最上层
+
+            // 找到所有比自己大的id，按从小到大排序
+            const largerIds = numericIds.filter(id => id > currentId);
+
+            // 先收集所有需要移动的数据（深拷贝，避免引用问题）
+            const moves = [];
+            // 当前块要移动到maxId
+            moves.push({
+                from: blockId,
+                to: String(maxId),
+                data: JSON.parse(JSON.stringify(codeMapData.codeMap[blockId]))
+            });
+            // 所有比自己大的块都要-1（从currentId开始依次填充）
+            largerIds.forEach((id, index) => {
+                const fromId = String(id);
+                const toId = String(currentId + index);
+                moves.push({
+                    from: fromId,
+                    to: toId,
+                    data: JSON.parse(JSON.stringify(codeMapData.codeMap[fromId]))
+                });
+            });
+
+            // 先更新所有箭头引用（建立映射关系）
+            const idMapping = {};
+            moves.forEach(move => {
+                idMapping[move.from] = move.to;
+            });
+
+            arrows.forEach(arrow => {
+                if (idMapping[arrow.from.block]) {
+                    arrow.from.block = idMapping[arrow.from.block];
+                }
+                if (idMapping[arrow.to.block]) {
+                    arrow.to.block = idMapping[arrow.to.block];
+                }
+            });
+
+            // 删除所有旧的条目（先删除，避免覆盖）
+            moves.forEach(move => {
+                delete codeMapData.codeMap[move.from];
+            });
+
+            // 创建所有新的条目（一次性创建，避免覆盖）
+            moves.forEach(move => {
+                codeMapData.codeMap[move.to] = move.data;
+            });
+
+            loadCodeBlocks();
+            recordAndSave();
+        }
+
+        // 移动到最下层：自己的id变成最小id，比自己小的所有id都+1
+        function moveBlockToBottom(blockId) {
+            const numericOnly = /^\\d+$/;
+            if (!numericOnly.test(blockId)) return;
+            const currentId = parseInt(blockId, 10);
+            const numericIds = getNumericIds();
+            const minId = numericIds[0];
+            if (currentId <= minId) return; // 已经在最下层
+
+            // 找到所有比自己小的id，按从小到大排序
+            const smallerIds = numericIds.filter(id => id < currentId);
+
+            // 先把自己的id改成临时id（使用一个很大的数字，确保不会冲突）
+            const tempId = String(minId + 1000);
+            const blockData = codeMapData.codeMap[blockId];
+            codeMapData.codeMap[tempId] = blockData;
+            delete codeMapData.codeMap[blockId];
+
+            // 更新箭头中的引用（先指向临时id）
+            arrows.forEach(arrow => {
+                if (arrow.from.block === blockId) arrow.from.block = tempId;
+                if (arrow.to.block === blockId) arrow.to.block = tempId;
+            });
+
+            // 所有比自己小的id都+1
+            smallerIds.reverse().forEach(id => {
+                const idStr = String(id);
+                const data = codeMapData.codeMap[idStr];
+                const newIdStr = String(id + 1);
+                codeMapData.codeMap[newIdStr] = data;
+                delete codeMapData.codeMap[idStr];
+
+                // 更新箭头中的引用
+                arrows.forEach(arrow => {
+                    if (arrow.from.block === idStr) arrow.from.block = newIdStr;
+                    if (arrow.to.block === idStr) arrow.to.block = newIdStr;
+                });
+            });
+
+            // 把自己的id改成最小id
+            const newMinId = String(minId);
+            codeMapData.codeMap[newMinId] = codeMapData.codeMap[tempId];
+            delete codeMapData.codeMap[tempId];
+
+            // 更新箭头中的引用
+            arrows.forEach(arrow => {
+                if (arrow.from.block === tempId) arrow.from.block = newMinId;
+                if (arrow.to.block === tempId) arrow.to.block = newMinId;
+            });
+
+            loadCodeBlocks();
+            recordAndSave();
+        }
+
         function getNextNumericNameForPath(filePath) {
+            // 查找所有代码块中、标题为纯数字的最大值 + 1（不再限制路径）
             const numericOnly = /^\\d+$/;
             let maxNum = 0;
             Object.entries(codeMapData.codeMap).forEach(([title, block]) => {
-                if (!block || block.path !== filePath) return;
+                if (!block) return;
                 if (!numericOnly.test(title)) return;
                 const n = parseInt(title, 10);
                 if (!Number.isNaN(n) && n > maxNum) maxNum = n;
@@ -878,6 +1059,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             const name = getNextNumericNameForPath(payload.path);
             codeMapData.codeMap[name] = {
+                name: name, // 默认name等于id
                 path: payload.path,
                 start_line: payload.start_line,
                 end_line: payload.end_line,
@@ -959,6 +1141,23 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 items.push({
                     label: '删除此代码块',
                     onClick: async () => deleteBlock(blockName)
+                });
+                items.push('sep');
+                items.push({
+                    label: '上移一层',
+                    onClick: async () => moveBlockUp(blockName)
+                });
+                items.push({
+                    label: '下移一层',
+                    onClick: async () => moveBlockDown(blockName)
+                });
+                items.push({
+                    label: '移动到最上层',
+                    onClick: async () => moveBlockToTop(blockName)
+                });
+                items.push({
+                    label: '移动到最下层',
+                    onClick: async () => moveBlockToBottom(blockName)
                 });
                 items.push('sep');
             }
@@ -1243,7 +1442,21 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             // 创建代码块
             for (const [name, blockData] of Object.entries(codeMapData.codeMap)) {
-                createCodeBlock(name, blockData);
+                // 为旧数据设置默认name值（兼容旧数据），并确保name在第一位
+                if (!blockData.name) {
+                    codeMapData.codeMap[name] = {
+                        name: name,
+                        ...blockData
+                    };
+                } else if (Object.keys(blockData)[0] !== 'name') {
+                    // 如果name不在第一位，重新构建对象确保name在第一位
+                    const { name: blockName, ...rest } = blockData;
+                    codeMapData.codeMap[name] = {
+                        name: blockName,
+                        ...rest
+                    };
+                }
+                createCodeBlock(name, codeMapData.codeMap[name]);
             }
 
             updateArrows();
@@ -1272,7 +1485,8 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             const title = document.createElement('span');
             title.className = 'code-block-title';
-            title.textContent = \`\${blockData.path}@\${blockData.start_line}:\${blockData.end_line}@\${name}\`;
+            const displayName = blockData.name || name; // 使用name属性，如果没有则使用id（兼容旧数据）
+            title.textContent = \`\${blockData.path}@\${blockData.start_line}:\${blockData.end_line}@\${displayName}\`;
             title.dataset.blockName = name;
 
             // 双击编辑代码块名称
@@ -1286,9 +1500,10 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
                 const input = document.createElement('input');
                 input.type = 'text';
-                // 使用“当前名称”（可能已被用户改过），不要用 createCodeBlock 闭包里的旧 name
-                const oldNameAtStart = title.dataset.blockName || name;
-                input.value = oldNameAtStart;
+                // 使用"当前显示名称"（name属性），如果没有则使用id（兼容旧数据）
+                const blockId = title.dataset.blockName || name;
+                const currentDisplayName = blockData.name || blockId;
+                input.value = currentDisplayName;
                 input.className = 'rename-input';
 
                 const ok = document.createElement('span');
@@ -1306,12 +1521,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 };
 
                 const commit = () => {
-                    const newName = input.value.trim();
-                    if (!newName || newName === oldNameAtStart) {
+                    const newDisplayName = input.value.trim();
+                    if (!newDisplayName || newDisplayName === currentDisplayName) {
                         restore();
                         return;
                     }
-                    renameBlock(oldNameAtStart, newName);
+                    renameBlock(blockId, newDisplayName);
                     restore();
                 };
 
@@ -2000,39 +2215,25 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             recordAndSave();
         }
 
-        // 重命名代码块
-        function renameBlock(oldName, newName) {
-            if (codeMapData.codeMap[newName]) {
-                vscode.postMessage({
-                    command: 'showError',
-                    message: '代码块名称已存在'
-                });
-                return;
-            }
+        // 重命名代码块（只修改name属性，不修改codeMap的key）
+        function renameBlock(blockId, newDisplayName) {
+            const block = codeBlocks[blockId];
+            if (!block) return;
 
-            codeMapData.codeMap[newName] = codeMapData.codeMap[oldName];
-            delete codeMapData.codeMap[oldName];
+            // 只修改name属性，不修改codeMap的key（blockId保持不变），并确保name在第一位
+            const oldBlockData = codeMapData.codeMap[blockId];
+            const { name: _, ...rest } = oldBlockData;
+            codeMapData.codeMap[blockId] = {
+                name: newDisplayName,
+                ...rest
+            };
+            block.data.name = newDisplayName;
 
-            const block = codeBlocks[oldName];
-            block.element.dataset.blockName = newName;
-            block.title.dataset.blockName = newName;
-            block.title.textContent = \`\${block.data.path}@\${block.data.start_line}:\${block.data.end_line}@\${newName}\`;
-
-            codeBlocks[newName] = block;
-            delete codeBlocks[oldName];
-
-            // 更新箭头中的引用
-            arrows.forEach(arrow => {
-                if (arrow.from.block === oldName) {
-                    arrow.from.block = newName;
-                }
-                if (arrow.to.block === oldName) {
-                    arrow.to.block = newName;
-                }
-            });
+            // 更新标题显示
+            const displayName = newDisplayName;
+            block.title.textContent = \`\${block.data.path}@\${block.data.start_line}:\${block.data.end_line}@\${displayName}\`;
 
             recordAndSave();
-            updateArrows();
         }
 
         // 保存数据
