@@ -440,7 +440,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             font-size: 13px;
             line-height: 19.5px;
             user-select: text;
-            cursor: text;
+            cursor: default; /* 不显示 I 字形光标，保持指针样式 */
         }
 
         .code-line {
@@ -1136,13 +1136,15 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 } else {
                     block.element.style.pointerEvents = 'auto';
                     block.content.style.userSelect = 'text';
-                    block.content.style.cursor = 'text';
+                    // 非箭头模式下也保持指针样式，而不是 I 字形
+                    block.content.style.cursor = 'default';
                 }
                 // 箭头模式下允许点击"代码文本"来选择列（J）
                 block.element.querySelectorAll('.code-line-content').forEach(el => {
                     // 即便禁用了 block.element，也允许点击代码文本来选点
                     el.style.pointerEvents = 'auto';
-                    el.style.cursor = disabled ? 'crosshair' : 'text';
+                    // 箭头模式下用十字，普通模式用指针，不再出现 I 字形
+                    el.style.cursor = disabled ? 'crosshair' : 'default';
                 });
             });
         }
