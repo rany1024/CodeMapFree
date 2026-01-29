@@ -289,6 +289,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             background: var(--vscode-editor-background);
         }
 
+        .canvas-container > .canvas-content {
+            position: relative;
+            min-width: 100%;
+            min-height: 100%;
+        }
+
         .code-block {
             position: absolute;
             border: 2px solid var(--vscode-panel-border);
@@ -595,13 +601,15 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         </div>
     </div>
     <div class="canvas-container" id="canvas">
-        <svg class="arrow-layer" id="arrowLayer">
-            <defs>
-                <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-                    <polygon points="0 0, 10 3, 0 6" fill="var(--vscode-textLink-foreground)" />
-                </marker>
-            </defs>
-        </svg>
+        <div class="canvas-content" id="canvasContent">
+            <svg class="arrow-layer" id="arrowLayer">
+                <defs>
+                    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                        <polygon points="0 0, 10 3, 0 6" fill="var(--vscode-textLink-foreground)" />
+                    </marker>
+                </defs>
+            </svg>
+        </div>
     </div>
     <div class="cmf-menu" id="cmfMenu"></div>
 
@@ -609,6 +617,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const canvas = document.getElementById('canvas');
+        const canvasContent = document.getElementById('canvasContent');
         const arrowLayer = document.getElementById('arrowLayer');
         const arrowTool = document.getElementById('arrowTool');
         const arrowColorPicker = document.getElementById('arrowColorPicker');
@@ -1041,6 +1050,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             if (arrowMode && arrowColorPicker.classList.contains('active')) {
                 positionColorPicker();
             }
+            updateCanvasSize(); // 窗口大小改变时更新画布尺寸
         });
 
         // 颜色选择器事件
@@ -1168,6 +1178,47 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             return blockEl ? blockEl.dataset.blockName : null;
         }
 
+        // 更新画布尺寸（根据代码块位置动态扩展）
+        function updateCanvasSize() {
+            if (!canvasContent) return;
+
+            const blocks = Object.values(codeBlocks);
+            if (blocks.length === 0) {
+                // 没有代码块时，保持最小尺寸
+                canvasContent.style.minWidth = '100%';
+                canvasContent.style.minHeight = '100%';
+                return;
+            }
+
+            // 计算所有代码块的边界（直接使用存储的位置数据）
+            let minX = Infinity, minY = Infinity;
+            let maxX = -Infinity, maxY = -Infinity;
+
+            blocks.forEach(block => {
+                const data = block.data;
+                const x = data.x || 0;
+                const y = data.y || 0;
+                const right = x + (data.w || 400);
+                const bottom = y + (data.h || 300);
+
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, right);
+                maxY = Math.max(maxY, bottom);
+            });
+
+            // 获取当前窗口尺寸
+            const windowWidth = window.innerWidth;
+            const windowHeight = window.innerHeight - 40; // 减去工具栏高度
+
+            // 设置画布最小尺寸：最右代码块右边 + 窗口宽，最下代码块底边 + 窗口高
+            const minWidth = Math.max(100, maxX + windowWidth);
+            const minHeight = Math.max(100, maxY + windowHeight);
+
+            canvasContent.style.minWidth = minWidth + 'px';
+            canvasContent.style.minHeight = minHeight + 'px';
+        }
+
         // 加载代码块
         function loadCodeBlocks() {
             // 清空现有代码块
@@ -1181,7 +1232,8 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             updateArrows();
             updateBlockInteractivity();
-            // 重建后恢复“代码块选中”样式（如果块仍存在）
+            updateCanvasSize(); // 更新画布尺寸
+            // 重建后恢复"代码块选中"样式（如果块仍存在）
             if (selectedBlockName && codeBlocks[selectedBlockName]?.element) {
                 codeBlocks[selectedBlockName].element.classList.add('selected');
             } else if (selectedBlockName) {
@@ -1400,7 +1452,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             // 添加缩放手柄（8 个方向）
             addResizeHandles(block, name);
 
-            canvas.appendChild(block);
+            canvasContent.appendChild(block);
 
             codeBlocks[name] = {
                 element: block,
@@ -1949,10 +2001,21 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             for (const [name, block] of Object.entries(codeBlocks)) {
                 const rect = block.element.getBoundingClientRect();
                 const canvasRect = canvas.getBoundingClientRect();
-                codeMapData.codeMap[name].x = rect.left - canvasRect.left + canvas.scrollLeft;
-                codeMapData.codeMap[name].y = rect.top - canvasRect.top + canvas.scrollTop;
-                codeMapData.codeMap[name].w = rect.width;
-                codeMapData.codeMap[name].h = rect.height;
+                const x = rect.left - canvasRect.left + canvas.scrollLeft;
+                const y = rect.top - canvasRect.top + canvas.scrollTop;
+                const w = rect.width;
+                const h = rect.height;
+
+                codeMapData.codeMap[name].x = x;
+                codeMapData.codeMap[name].y = y;
+                codeMapData.codeMap[name].w = w;
+                codeMapData.codeMap[name].h = h;
+
+                // 同步更新 block.data，供 updateCanvasSize 使用
+                block.data.x = x;
+                block.data.y = y;
+                block.data.w = w;
+                block.data.h = h;
             }
 
             codeMapData.arrows = arrows;
@@ -1960,6 +2023,9 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 command: 'save',
                 data: codeMapData
             });
+
+            // 保存后更新画布尺寸
+            updateCanvasSize();
         }
 
         // 鼠标移动和释放
@@ -2012,6 +2078,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 // 连接点位置依赖 block 的 top/height，但点本身是绝对定位于 block 内部（不会自动重算 top）
                 // 这里保持点在原 line 上即可（缩放不会改变行数/行高），所以只需要更新箭头
                 updateArrows();
+                updateCanvasSize(); // 缩放时更新画布尺寸
                 return;
             }
 
@@ -2022,6 +2089,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 dragTarget.style.left = Math.max(0, x) + 'px';
                 dragTarget.style.top = Math.max(0, y) + 'px';
                 updateArrows();
+                updateCanvasSize(); // 拖动时更新画布尺寸
             }
         });
 
