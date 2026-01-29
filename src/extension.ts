@@ -1122,47 +1122,74 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             const items = [];
 
-            if (blockName && inHeader) {
-                items.push({
-                    label: '复制此代码块',
-                    onClick: async () => {
-                        const b = codeMapData.codeMap[blockName];
-                        if (!b) return;
-                        const payload = {
-                            path: b.path,
-                            start_line: b.start_line,
-                            end_line: b.end_line,
-                            w: b.w,
-                            h: b.h
-                        };
-                        await writeClipboardText(BLOCK_CLIP_PREFIX + JSON.stringify(payload));
+            // 生成标题栏菜单项的函数
+            function getHeaderMenuItems(blockName, event) {
+                return [
+                    {
+                        label: '复制此代码块',
+                        onClick: async () => {
+                            const b = codeMapData.codeMap[blockName];
+                            if (!b) return;
+                            const payload = {
+                                path: b.path,
+                                start_line: b.start_line,
+                                end_line: b.end_line,
+                                w: b.w,
+                                h: b.h
+                            };
+                            await writeClipboardText(BLOCK_CLIP_PREFIX + JSON.stringify(payload));
+                        }
+                    },
+                    {
+                        label: '删除此代码块',
+                        onClick: async () => deleteBlock(blockName)
+                    },
+                    {
+                        label: '在此粘贴新代码块',
+                        onClick: async () => {
+                            const t = await readClipboardText();
+                            if (!t || !t.startsWith(BLOCK_CLIP_PREFIX)) {
+                                vscode.postMessage({ command: 'showError', message: '剪贴板里没有可粘贴的 CodeMapFree 代码块' });
+                                return;
+                            }
+                            try {
+                                const payload = JSON.parse(t.slice(BLOCK_CLIP_PREFIX.length));
+                                if (!payload || !payload.path || !payload.start_line || !payload.end_line) {
+                                    vscode.postMessage({ command: 'showError', message: '剪贴板中的代码块数据格式不正确' });
+                                    return;
+                                }
+                                createPastedBlockAt(event.clientX, event.clientY, payload);
+                            } catch (err) {
+                                vscode.postMessage({ command: 'showError', message: '解析剪贴板中的代码块数据失败' });
+                            }
+                        }
+                    },
+                    'sep',
+                    {
+                        label: '上移一层',
+                        onClick: async () => moveBlockUp(blockName)
+                    },
+                    {
+                        label: '下移一层',
+                        onClick: async () => moveBlockDown(blockName)
+                    },
+                    {
+                        label: '移动到最上层',
+                        onClick: async () => moveBlockToTop(blockName)
+                    },
+                    {
+                        label: '移动到最下层',
+                        onClick: async () => moveBlockToBottom(blockName)
                     }
-                });
-                items.push({
-                    label: '删除此代码块',
-                    onClick: async () => deleteBlock(blockName)
-                });
-                items.push('sep');
-                items.push({
-                    label: '上移一层',
-                    onClick: async () => moveBlockUp(blockName)
-                });
-                items.push({
-                    label: '下移一层',
-                    onClick: async () => moveBlockDown(blockName)
-                });
-                items.push({
-                    label: '移动到最上层',
-                    onClick: async () => moveBlockToTop(blockName)
-                });
-                items.push({
-                    label: '移动到最下层',
-                    onClick: async () => moveBlockToBottom(blockName)
-                });
-                items.push('sep');
+                ];
+            }
+
+            if (blockName && inHeader) {
+                items.push(...getHeaderMenuItems(blockName, e));
             }
 
             if (blockName && inContent) {
+                // 内容区域菜单顺序：复制选择内容 -> 复制整个代码块内容 -> 分割线 -> 继承标题菜单
                 items.push({
                     label: '复制选择内容',
                     onClick: async () => {
@@ -1184,28 +1211,32 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     }
                 });
                 items.push('sep');
+                items.push(...getHeaderMenuItems(blockName, e));
             }
 
-            items.push({
-                label: '在此粘贴新代码块',
-                onClick: async () => {
-                    const t = await readClipboardText();
-                    if (!t || !t.startsWith(BLOCK_CLIP_PREFIX)) {
-                        vscode.postMessage({ command: 'showError', message: '剪贴板里没有可粘贴的 CodeMapFree 代码块' });
-                        return;
-                    }
-                    try {
-                        const payload = JSON.parse(t.slice(BLOCK_CLIP_PREFIX.length));
-                        if (!payload || !payload.path || !payload.start_line || !payload.end_line) {
-                            vscode.postMessage({ command: 'showError', message: '剪贴板中的代码块数据格式不正确' });
+            // 如果不在代码块内，显示"在此粘贴新代码块"
+            if (!blockName) {
+                items.push({
+                    label: '在此粘贴新代码块',
+                    onClick: async () => {
+                        const t = await readClipboardText();
+                        if (!t || !t.startsWith(BLOCK_CLIP_PREFIX)) {
+                            vscode.postMessage({ command: 'showError', message: '剪贴板里没有可粘贴的 CodeMapFree 代码块' });
                             return;
                         }
-                        createPastedBlockAt(e.clientX, e.clientY, payload);
-                    } catch (err) {
-                        vscode.postMessage({ command: 'showError', message: '解析剪贴板中的代码块数据失败' });
+                        try {
+                            const payload = JSON.parse(t.slice(BLOCK_CLIP_PREFIX.length));
+                            if (!payload || !payload.path || !payload.start_line || !payload.end_line) {
+                                vscode.postMessage({ command: 'showError', message: '剪贴板中的代码块数据格式不正确' });
+                                return;
+                            }
+                            createPastedBlockAt(e.clientX, e.clientY, payload);
+                        } catch (err) {
+                            vscode.postMessage({ command: 'showError', message: '解析剪贴板中的代码块数据失败' });
+                        }
                     }
-                }
-            });
+                });
+            }
 
             showMenu(items, e.clientX, e.clientY);
         }, true);
@@ -1700,6 +1731,8 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 // 正在重命名时不触发选中
                 if (isTextEditingTarget(document.activeElement)) return;
                 e.stopPropagation();
+                // 隐藏右键菜单
+                hideMenu();
                 // 选中代码块时取消箭头选中
                 if (selectedArrowIndex !== -1) clearArrowSelection();
                 setSelectedBlock(name);
@@ -1719,13 +1752,15 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 endLine: blockData.end_line
             });
 
-            // 拖动功能
+            // 拖动功能（只有左键才允许拖动）
             header.addEventListener('mousedown', (e) => {
                 if (arrowMode) {
                     e.preventDefault();
                     e.stopPropagation();
                     return;
                 }
+                // 只有左键（button === 0）才允许拖动
+                if (e.button !== 0) return;
                 // 缩放中不允许拖拽移动
                 if (isResizing) return;
                 isDragging = true;
