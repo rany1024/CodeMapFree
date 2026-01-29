@@ -593,7 +593,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
     <div class="arrow-color-picker" id="arrowColorPicker">
         <span class="arrow-color-label">箭头颜色</span>
         <input type="color" class="arrow-color-input" id="arrowColorInput" value="#007acc">
-        <input type="range" class="arrow-alpha-input" id="arrowAlphaInput" min="0.2" max="1" step="0.05" value="1" title="透明度 (20% - 100%)">
+        <input type="range" class="arrow-alpha-input" id="arrowAlphaInput" min="0.45" max="1" step="0.05" value="0.45" title="透明度 (45% - 100%)">
         <div class="arrow-color-presets">
             <div class="arrow-color-preset" data-color="#007acc" style="background: #007acc;" title="蓝色"></div>
             <div class="arrow-color-preset" data-color="#ff6b6b" style="background: #ff6b6b;" title="红色"></div>
@@ -649,7 +649,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         let currentArrow = null;
         let arrows = codeMapData.arrows || [];
         let currentArrowColor = '#007acc'; // 默认颜色
-        let currentArrowAlpha = 1; // 默认不透明
+        let currentArrowAlpha = 0.45; // 默认透明度（最低值）
         const LINE_HEIGHT = 19.5;
         const CODE_PADDING_X = 10; // .code-block-content padding
         const LINE_NUM_GUTTER_W = 50; // .code-line-number width (CSS)
@@ -1599,6 +1599,10 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 alpha: currentArrowAlpha
             };
             arrows.push(arrow);
+
+            // 新创建的箭头默认视为被选中
+            const newIndex = arrows.length - 1;
+            selectArrow(newIndex);
 
             // 清除预览箭头
             if (currentArrow) {
