@@ -2,7 +2,7 @@
   "name": "codemapfree",
   "displayName": "CodeMapFree",
   "description": "代码地图可视化工具",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "rany1024",
   "repository": {
     "type": "git",
