@@ -468,6 +468,31 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             white-space: pre;
         }
 
+        /* 全局高亮样式 - 使用更具体的选择器确保优先级 */
+        .code-block-content .code-line-content .cmf-highlight,
+        .code-block-content .code-line-content span.cmf-highlight,
+        .code-block-content .code-line-content .hljs .cmf-highlight,
+        .code-block-content .code-line-content .hljs-keyword.cmf-highlight,
+        .code-block-content .code-line-content .hljs-string.cmf-highlight,
+        .code-block-content .code-line-content .hljs-variable.cmf-highlight,
+        .code-block-content .code-line-content .hljs-function.cmf-highlight,
+        .code-block-content .code-line-content .hljs-title.cmf-highlight,
+        .code-block-content .code-line-content span.hljs-keyword.cmf-highlight,
+        .code-block-content .code-line-content span.hljs-string.cmf-highlight,
+        .code-block-content .code-line-content span.hljs-variable.cmf-highlight {
+            background-color: #ffeb3b !important;
+            background: #ffeb3b !important;
+            border-radius: 3px;
+            padding: 2px 4px;
+            margin: 0 1px;
+            font-weight: bold !important;
+            box-shadow: 0 0 0 1px rgba(255, 200, 0, 0.8) !important;
+            color: inherit !important;
+            display: inline !important;
+            position: relative;
+            z-index: 10;
+        }
+
         /* highlight.js 样式覆盖，确保在代码块中正确显示 */
         .code-block-content .hljs {
             background: transparent;
@@ -2180,6 +2205,15 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         // 代码块选中（单击选中，Delete 删除）
         let selectedBlockName = null; // string | null
 
+        // 全局高亮状态
+        let currentHighlightText = null; // string | null
+        // 单击/双击处理
+        let clickTimer = null;
+        let lastClickTime = 0;
+        const CLICK_DELAY = 200; // 200ms内如果有第二次点击，视为双击
+        let isDraggingText = false; // 是否正在拖动选择文本
+        let dragStartPos = null; // 拖动开始位置
+
         function stopEndpointPreview() {
             if (endpointPreviewLine) {
                 try { endpointPreviewLine.remove(); } catch (e) { /* ignore */ }
@@ -2283,6 +2317,240 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
         function clearBlockSelection() {
             setSelectedBlock(null);
+        }
+
+        // 选中点击位置的单词
+        function selectWordAtPoint(x, y) {
+            const selection = window.getSelection();
+            if (!selection) return null;
+
+            // 清除当前选择
+            selection.removeAllRanges();
+
+            // 获取点击位置的元素
+            const element = document.elementFromPoint(x, y);
+            if (!element) return null;
+
+            // 找到包含文本的节点
+            let textNode = null;
+            let offset = 0;
+
+            // 尝试使用 caretRangeFromPoint（如果可用）
+            let range = null;
+            if (document.caretRangeFromPoint) {
+                range = document.caretRangeFromPoint(x, y);
+            } else if (document.caretPositionFromPoint) {
+                const pos = document.caretPositionFromPoint(x, y);
+                if (pos) {
+                    range = document.createRange();
+                    range.setStart(pos.offsetNode, pos.offset);
+                    range.setEnd(pos.offsetNode, pos.offset);
+                }
+            }
+
+            if (range) {
+                textNode = range.startContainer;
+                if (textNode.nodeType === Node.TEXT_NODE) {
+                    offset = range.startOffset;
+                } else {
+                    // 如果是元素节点，查找其中的文本节点
+                    const walker = document.createTreeWalker(
+                        textNode,
+                        NodeFilter.SHOW_TEXT,
+                        null,
+                        false
+                    );
+                    textNode = walker.nextNode();
+                    offset = 0;
+                }
+            }
+
+            // 如果没找到，尝试从元素查找
+            if (!textNode) {
+                const lineContent = element.closest('.code-line-content');
+                if (lineContent) {
+                    const walker = document.createTreeWalker(
+                        lineContent,
+                        NodeFilter.SHOW_TEXT,
+                        null,
+                        false
+                    );
+                    let node;
+                    while (node = walker.nextNode()) {
+                        const rect = node.parentElement ? node.parentElement.getBoundingClientRect() : null;
+                        if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                            textNode = node;
+                            // 估算偏移量
+                            const text = node.textContent || '';
+                            if (text.length > 0) {
+                                const charWidth = rect.width / text.length;
+                                offset = Math.floor((x - rect.left) / charWidth);
+                                offset = Math.max(0, Math.min(offset, text.length));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!textNode || !textNode.textContent) return null;
+
+            const text = textNode.textContent;
+            // 找到单词边界
+            const wordRegex = /[a-zA-Z_$][a-zA-Z0-9_$]*/g;
+            let match;
+            let wordStart = -1;
+            let wordEnd = -1;
+
+            while ((match = wordRegex.exec(text)) !== null) {
+                if (offset >= match.index && offset <= match.index + match[0].length) {
+                    wordStart = match.index;
+                    wordEnd = match.index + match[0].length;
+                    break;
+                }
+            }
+
+            if (wordStart === -1) return null;
+
+            // 创建范围并选中
+            try {
+                const newRange = document.createRange();
+                newRange.setStart(textNode, wordStart);
+                newRange.setEnd(textNode, wordEnd);
+                selection.addRange(newRange);
+                return text.substring(wordStart, wordEnd);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // 转义正则表达式特殊字符
+        function escapeRegex(str) {
+            if (!str) return '';
+            let result = '';
+            for (let i = 0; i < str.length; i++) {
+                const char = str[i];
+                if (char === '.' || char === '*' || char === '+' || char === '?' ||
+                    char === '^' || char === '$' || char === '{' || char === '}' ||
+                    char === '(' || char === ')' || char === '|' || char === '[' ||
+                    char === ']' || char === '\\\\') {
+                    result += '\\\\' + char;
+                } else {
+                    result += char;
+                }
+            }
+            return result;
+        }
+
+        // 清除所有高亮
+        function clearAllHighlights() {
+            if (!currentHighlightText) return;
+            document.querySelectorAll('.cmf-highlight').forEach(el => {
+                const parent = el.parentNode;
+                if (parent) {
+                    parent.replaceChild(document.createTextNode(el.textContent), el);
+                    parent.normalize(); // 合并相邻的文本节点
+                }
+            });
+            currentHighlightText = null;
+        }
+
+        // 在所有代码块中高亮指定文本
+        function highlightTextInAllBlocks(text) {
+            if (!text || text.trim() === '') {
+                clearAllHighlights();
+                return;
+            }
+
+            // 清除之前的高亮
+            clearAllHighlights();
+
+            // 设置当前高亮文本
+            currentHighlightText = text.trim();
+
+            // 转义特殊字符，用于正则匹配
+            const escapedText = escapeRegex(currentHighlightText);
+            // 使用单词边界确保精确匹配（匹配完整的标识符）
+            const regex = new RegExp('\\\\b' + escapedText + '\\\\b', 'gi');
+
+            // 遍历所有代码块
+            Object.values(codeBlocks).forEach(block => {
+                if (!block.content) return;
+
+                // 遍历所有代码行
+                const lineContents = block.content.querySelectorAll('.code-line-content');
+                lineContents.forEach(lineEl => {
+                    highlightTextInElement(lineEl, regex, currentHighlightText);
+                });
+            });
+        }
+
+        // 在单个元素中高亮文本（递归处理，避免破坏 highlight.js 的 HTML 结构）
+        function highlightTextInElement(element, regex, text) {
+            if (!element) return;
+
+            // 遍历所有子节点
+            const walker = document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_TEXT,
+                null,
+                false
+            );
+
+            const textNodes = [];
+            let node;
+            while (node = walker.nextNode()) {
+                // 跳过已经在高亮标记内的文本节点
+                if (node.parentElement && node.parentElement.classList.contains('cmf-highlight')) {
+                    continue;
+                }
+                textNodes.push(node);
+            }
+
+            textNodes.forEach(textNode => {
+                const nodeValue = textNode.nodeValue;
+                if (!nodeValue || !regex.test(nodeValue)) return;
+
+                // 重新测试（因为 regex.test 会改变 lastIndex）
+                regex.lastIndex = 0;
+                const matches = [...nodeValue.matchAll(regex)];
+                if (matches.length === 0) return;
+
+                // 创建文档片段来替换文本节点
+                const fragment = document.createDocumentFragment();
+                let lastIndex = 0;
+
+                matches.forEach(match => {
+                    // 添加匹配前的文本
+                    if (match.index > lastIndex) {
+                        const beforeText = nodeValue.substring(lastIndex, match.index);
+                        if (beforeText) {
+                            fragment.appendChild(document.createTextNode(beforeText));
+                        }
+                    }
+
+                    // 添加高亮的文本
+                    const highlightSpan = document.createElement('span');
+                    highlightSpan.className = 'cmf-highlight';
+                    highlightSpan.textContent = match[0];
+                    fragment.appendChild(highlightSpan);
+
+                    lastIndex = match.index + match[0].length;
+                });
+
+                // 添加剩余的文本
+                if (lastIndex < nodeValue.length) {
+                    const afterText = nodeValue.substring(lastIndex);
+                    if (afterText) {
+                        fragment.appendChild(document.createTextNode(afterText));
+                    }
+                }
+
+                // 替换原文本节点
+                if (textNode.parentNode) {
+                    textNode.parentNode.replaceChild(fragment, textNode);
+                }
+            });
         }
 
         function deleteSelectedArrow() {
@@ -2486,6 +2754,13 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                 }
                 dragTarget = null;
             }
+            // 重置文本拖动状态
+            if (isDraggingText) {
+                setTimeout(() => {
+                    isDraggingText = false;
+                    dragStartPos = null;
+                }, 10);
+            }
         });
 
         // 处理来自扩展的消息
@@ -2515,6 +2790,133 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                         const language = detectLanguage(blockData.path);
                         const codeHtml = highlightCode(code, language, blockData.start_line);
                         codeBlocks[message.id].content.innerHTML = codeHtml;
+
+                        // 添加单击/双击事件监听器（如果还没有添加）
+                        const contentEl = codeBlocks[message.id].content;
+                        if (!contentEl.dataset.clickListenerAdded) {
+                            // 检测拖动操作：mousedown
+                            contentEl.addEventListener('mousedown', (e) => {
+                                // 箭头模式下不处理
+                                if (arrowMode || editingArrowEndpoint) return;
+                                // 只有左键才检测拖动
+                                if (e.button !== 0) return;
+
+                                dragStartPos = { x: e.clientX, y: e.clientY };
+                                isDraggingText = false;
+                            });
+
+                            // 检测拖动操作：mousemove
+                            contentEl.addEventListener('mousemove', (e) => {
+                                if (dragStartPos && !isDraggingText) {
+                                    // 如果鼠标移动超过5像素，认为是拖动操作
+                                    const dx = Math.abs(e.clientX - dragStartPos.x);
+                                    const dy = Math.abs(e.clientY - dragStartPos.y);
+                                    if (dx > 5 || dy > 5) {
+                                        isDraggingText = true;
+                                        // 清除可能存在的定时器，避免在拖动时触发高亮
+                                        if (clickTimer) {
+                                            clearTimeout(clickTimer);
+                                            clickTimer = null;
+                                        }
+                                    }
+                                }
+                            });
+
+                            // 检测拖动操作：mouseup
+                            contentEl.addEventListener('mouseup', (e) => {
+                                // 延迟重置拖动状态，确保 click 事件能正确检测
+                                setTimeout(() => {
+                                    isDraggingText = false;
+                                    dragStartPos = null;
+                                }, 10);
+                            });
+
+                            // 单击事件：用于触发全局高亮
+                            contentEl.addEventListener('click', (e) => {
+                                // 箭头模式下不处理单击高亮
+                                if (arrowMode || editingArrowEndpoint) return;
+
+                                // 如果正在拖动选择文本，不触发高亮
+                                if (isDraggingText) {
+                                    return;
+                                }
+
+                                const now = Date.now();
+                                const timeSinceLastClick = now - lastClickTime;
+                                lastClickTime = now;
+
+                                // 如果是双击（200ms内），清除定时器，不触发高亮，让浏览器正常处理双击选中
+                                if (timeSinceLastClick < CLICK_DELAY && clickTimer) {
+                                    clearTimeout(clickTimer);
+                                    clickTimer = null;
+                                    // 双击时不阻止默认行为，让浏览器正常选中文本
+                                    return;
+                                }
+
+                                // 清除之前的定时器
+                                if (clickTimer) {
+                                    clearTimeout(clickTimer);
+                                }
+
+                                // 延迟执行，等待是否会有双击
+                                clickTimer = setTimeout(() => {
+                                    clickTimer = null;
+
+                                    // 再次检查是否正在拖动（防止在延迟期间开始拖动）
+                                    if (isDraggingText) {
+                                        return;
+                                    }
+
+                                    // 先尝试选中点击位置的单词
+                                    let selectedText = null;
+                                    const selection = window.getSelection();
+
+                                    // 如果已经有选中文本，使用它
+                                    if (selection && selection.rangeCount > 0) {
+                                        selectedText = selection.toString().trim();
+                                    }
+
+                                    // 如果没有选中文本，尝试选中点击位置的单词
+                                    if (!selectedText) {
+                                        selectedText = selectWordAtPoint(e.clientX, e.clientY);
+                                    }
+
+                                    if (!selectedText) return;
+
+                                    // 检查是否是有效的标识符（字母、数字、下划线、$）
+                                    const identifierRegex = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+                                    if (!identifierRegex.test(selectedText)) return;
+
+                                    // 高亮所有代码块中的相同文本
+                                    highlightTextInAllBlocks(selectedText);
+                                }, CLICK_DELAY);
+                            });
+
+                            // 双击事件：确保双击时清除单击定时器，让浏览器正常处理文本选择
+                            contentEl.addEventListener('dblclick', (e) => {
+                                // 箭头模式下不处理
+                                if (arrowMode || editingArrowEndpoint) return;
+
+                                // 清除单击定时器，不触发高亮
+                                if (clickTimer) {
+                                    clearTimeout(clickTimer);
+                                    clickTimer = null;
+                                }
+                                // 不阻止默认行为，让浏览器正常选中文本用于复制
+                            });
+
+                            contentEl.dataset.clickListenerAdded = 'true';
+                        }
+
+                        // 如果当前有高亮文本，重新应用高亮
+                        if (currentHighlightText) {
+                            const escapedText = escapeRegex(currentHighlightText);
+                            const regex = new RegExp('\\\\b' + escapedText + '\\\\b', 'gi');
+                            const lineContents = contentEl.querySelectorAll('.code-line-content');
+                            lineContents.forEach(lineEl => {
+                                highlightTextInElement(lineEl, regex, currentHighlightText);
+                            });
+                        }
 
                         // 如果是新代码块，计算并应用最佳尺寸
                         if (pendingAutoSizeBlock === message.id) {
