@@ -512,6 +512,19 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             pointer-events: all;
             cursor: pointer;
         }
+        /* 箭头控件中的元素 */
+        .arrow-layer g[data-arrow-widget="true"] line {
+            pointer-events: stroke;
+            cursor: pointer;
+        }
+        .arrow-layer g[data-arrow-widget="true"] polygon {
+            pointer-events: all;
+            cursor: pointer;
+        }
+        .arrow-layer g[data-arrow-widget="true"] circle {
+            pointer-events: all;
+            cursor: pointer;
+        }
 
         .arrow-color-picker {
             display: none;
@@ -619,7 +632,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
         <div class="canvas-content" id="canvasContent">
             <svg class="arrow-layer" id="arrowLayer">
                 <defs>
-                    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="0" refY="3" orient="auto">
                         <polygon points="0 0, 10 3, 0 6" fill="var(--vscode-textLink-foreground)" />
                     </marker>
                 </defs>
@@ -1886,20 +1899,21 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             const fromX = p.x;
             const fromY = p.y;
 
-            // 创建箭头标记
-            const markerId = 'arrowhead-' + currentArrowColor.replace('#', '');
+            // 创建箭头标记（包含颜色和透明度信息）
+            const markerId = 'arrowhead-' + currentArrowColor.replace('#', '') + '-' + String(currentArrowAlpha).replace('.', '_');
             let marker = arrowLayer.querySelector('#' + markerId);
             if (!marker) {
                 marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
                 marker.setAttribute('id', markerId);
                 marker.setAttribute('markerWidth', '10');
                 marker.setAttribute('markerHeight', '10');
-                marker.setAttribute('refX', '9');
+                marker.setAttribute('refX', '0');
                 marker.setAttribute('refY', '3');
                 marker.setAttribute('orient', 'auto');
                 const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
                 polygon.setAttribute('points', '0 0, 10 3, 0 6');
                 polygon.setAttribute('fill', currentArrowColor);
+                polygon.setAttribute('fill-opacity', String(currentArrowAlpha));
                 marker.appendChild(polygon);
                 arrowLayer.querySelector('defs').appendChild(marker);
             }
@@ -1929,11 +1943,33 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             if (!currentArrow || !arrowStart) return;
 
             const canvasRect = canvas.getBoundingClientRect();
-            const x = e.clientX - canvasRect.left + canvas.scrollLeft;
-            const y = e.clientY - canvasRect.top + canvas.scrollTop;
+            const toX = e.clientX - canvasRect.left + canvas.scrollLeft;
+            const toY = e.clientY - canvasRect.top + canvas.scrollTop;
 
-            currentArrow.setAttribute('x2', x);
-            currentArrow.setAttribute('y2', y);
+            // 获取起点位置
+            const p = getAnchorPoint(arrowStart.block, arrowStart.x, arrowStart.y);
+            if (!p) return;
+            const fromX = p.x;
+            const fromY = p.y;
+
+            // 计算箭头方向向量和长度
+            const dx = toX - fromX;
+            const dy = toY - fromY;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const TRIANGLE_LENGTH = 16; // 三角形长度（与 createArrowWidget 保持一致）
+
+            // 调整线条终点：真实绘制长度 = 现在的长度 - 三角形的长度
+            let adjustedToX = toX;
+            let adjustedToY = toY;
+            if (length > TRIANGLE_LENGTH) {
+                const unitX = dx / length;
+                const unitY = dy / length;
+                adjustedToX = toX - unitX * TRIANGLE_LENGTH;
+                adjustedToY = toY - unitY * TRIANGLE_LENGTH;
+            }
+
+            currentArrow.setAttribute('x2', adjustedToX);
+            currentArrow.setAttribute('y2', adjustedToY);
         }
 
         // 点击画布空白处取消起点选择
@@ -1993,11 +2029,112 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
             }
         });
 
+        // 创建箭头控件（封装在一个group中）
+        function createArrowWidget(idx, fromX, fromY, toX, toY, arrowColor, arrowAlpha, isSelected) {
+            // 增大三角形尺寸，使其更明显
+            const TRIANGLE_LENGTH = 16; // 三角形长度
+            const TRIANGLE_HEIGHT = 12; // 三角形高度
+            const TRIANGLE_CENTER_Y = TRIANGLE_HEIGHT / 2; // 三角形中心Y坐标（6）
+
+            // 计算箭头方向向量和长度
+            const dx = toX - fromX;
+            const dy = toY - fromY;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+            // 计算单位向量
+            const unitX = length > 0 ? dx / length : 0;
+            const unitY = length > 0 ? dy / length : 0;
+
+            // 调整线条终点：真实绘制长度 = 现在的长度 - 三角形的长度
+            // 这样箭头尖端才能指向正确的 toX, toY 位置
+            const adjustedToX = length > TRIANGLE_LENGTH ? toX - unitX * TRIANGLE_LENGTH : toX;
+            const adjustedToY = length > TRIANGLE_LENGTH ? toY - unitY * TRIANGLE_LENGTH : toY;
+
+            // 创建主容器 group
+            const arrowGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            arrowGroup.dataset.arrowIndex = String(idx);
+            arrowGroup.dataset.arrowWidget = 'true';
+
+            // 创建线条
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', String(fromX));
+            line.setAttribute('y1', String(fromY));
+            line.setAttribute('x2', String(adjustedToX));
+            line.setAttribute('y2', String(adjustedToY));
+            line.setAttribute('stroke', arrowColor);
+            line.setAttribute('stroke-width', isSelected ? '3' : '2');
+            line.setAttribute('stroke-opacity', String(arrowAlpha));
+            line.style.cursor = 'pointer';
+            line.style.pointerEvents = 'stroke';
+            arrowGroup.appendChild(line);
+
+            // 创建三角形（箭头头部）
+            // 三角形从 (0, 0) 开始，向右延伸到 (TRIANGLE_LENGTH, TRIANGLE_CENTER_Y)，底部在 (0, TRIANGLE_HEIGHT)
+            // 旋转中心在 (0, TRIANGLE_CENTER_Y)，这样旋转后尖端会指向正确方向
+            const triangle = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            const trianglePoints = [
+                [0, 0],                              // 顶部
+                [TRIANGLE_LENGTH, TRIANGLE_CENTER_Y], // 右侧尖点
+                [0, TRIANGLE_HEIGHT]                // 底部
+            ];
+            const pointsStr = trianglePoints.map(p => p.join(',')).join(' ');
+            triangle.setAttribute('points', pointsStr);
+            triangle.setAttribute('fill', arrowColor);
+            triangle.setAttribute('fill-opacity', String(arrowAlpha));
+            triangle.setAttribute('stroke', 'none');
+            // 先平移到调整后的终点（三角形底部中心），然后围绕底部中心旋转
+            // 这样三角形会从 adjustedToX, adjustedToY 开始，向右延伸，尖端在 toX, toY
+            triangle.setAttribute('transform', \`translate(\${adjustedToX}, \${adjustedToY - TRIANGLE_CENTER_Y}) rotate(\${angle}, 0, \${TRIANGLE_CENTER_Y})\`);
+            triangle.style.cursor = 'pointer';
+            triangle.style.pointerEvents = 'all';
+            arrowGroup.appendChild(triangle);
+
+            // 统一的事件处理
+            const handleClick = (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                selectArrow(idx);
+            };
+            line.addEventListener('click', handleClick);
+            triangle.addEventListener('click', handleClick);
+
+            // 若选中该箭头：绘制端点圆点
+            if (isSelected) {
+                const r = 5;
+                const mkCircle = (cx, cy, endpoint) => {
+                    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    c.setAttribute('cx', String(cx));
+                    c.setAttribute('cy', String(cy));
+                    c.setAttribute('r', String(r));
+                    c.setAttribute('fill', arrowColor);
+                    c.setAttribute('fill-opacity', String(arrowAlpha));
+                    c.setAttribute('stroke', 'rgba(0,0,0,0.25)');
+                    c.setAttribute('stroke-width', '1');
+                    c.dataset.endpoint = endpoint;
+                    c.style.cursor = 'pointer';
+                    c.style.pointerEvents = 'all';
+                    c.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        beginEditArrowEndpoint(idx, endpoint);
+                    });
+                    return c;
+                };
+                // 起点圆点
+                arrowGroup.appendChild(mkCircle(fromX, fromY, 'from'));
+                // 终点圆点画在三角形尖端（toX, toY）
+                arrowGroup.appendChild(mkCircle(toX, toY, 'to'));
+            }
+
+            return arrowGroup;
+        }
+
         // 更新所有箭头
         function updateArrows() {
-            // 清空现有箭头（除了正在绘制的）
-            arrowLayer.querySelectorAll('line,circle').forEach(el => {
-                if (el !== currentArrow && el !== endpointPreviewLine) el.remove();
+            // 清空现有箭头控件（除了正在绘制的）
+            arrowLayer.querySelectorAll('g[data-arrow-widget="true"]').forEach(el => {
+                el.remove();
             });
 
             // 绘制箭头
@@ -2009,75 +2146,14 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
                     const p1 = getAnchorPoint(arrow.from.block, arrow.from.x, arrow.from.y);
                     const p2 = getAnchorPoint(arrow.to.block, arrow.to.x, arrow.to.y);
                     if (!p1 || !p2) return;
-                    const fromX = p1.x;
-                    const fromY = p1.y;
-                    const toX = p2.x;
-                    const toY = p2.y;
 
                     const arrowColor = arrow.color || '#007acc';
                     const arrowAlpha = (typeof arrow.alpha === 'number') ? arrow.alpha : 1;
-                    const markerId = 'arrowhead-' + arrowColor.replace('#', '');
+                    const isSelected = selectedArrowIndex === idx;
 
-                    // 确保标记存在
-                    let marker = arrowLayer.querySelector('#' + markerId);
-                    if (!marker) {
-                        marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-                        marker.setAttribute('id', markerId);
-                        marker.setAttribute('markerWidth', '10');
-                        marker.setAttribute('markerHeight', '10');
-                        marker.setAttribute('refX', '9');
-                        marker.setAttribute('refY', '3');
-                        marker.setAttribute('orient', 'auto');
-                        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                        polygon.setAttribute('points', '0 0, 10 3, 0 6');
-                        polygon.setAttribute('fill', arrowColor);
-                        marker.appendChild(polygon);
-                        arrowLayer.querySelector('defs').appendChild(marker);
-                    }
-
-                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                    line.setAttribute('x1', fromX);
-                    line.setAttribute('y1', fromY);
-                    line.setAttribute('x2', toX);
-                    line.setAttribute('y2', toY);
-                    line.setAttribute('stroke', arrowColor);
-                    line.setAttribute('stroke-width', (selectedArrowIndex === idx) ? '3' : '2');
-                    line.setAttribute('stroke-opacity', String(arrowAlpha));
-                    line.setAttribute('marker-end', 'url(#' + markerId + ')');
-                    line.dataset.arrowIndex = String(idx);
-                    line.addEventListener('click', (e) => {
-                        // 箭头模式下也允许点击选中箭头进入可编辑状态
-                        e.stopPropagation();
-                        e.preventDefault();
-                        selectArrow(idx);
-                    });
-                    arrowLayer.appendChild(line);
-
-                    // 若选中该箭头：绘制端点圆点（同色）
-                    if (selectedArrowIndex === idx) {
-                        const r = 5;
-                        const mkCircle = (cx, cy, endpoint) => {
-                            const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                            c.setAttribute('cx', String(cx));
-                            c.setAttribute('cy', String(cy));
-                            c.setAttribute('r', String(r));
-                            c.setAttribute('fill', arrowColor);
-                            c.setAttribute('fill-opacity', String(arrowAlpha));
-                            c.setAttribute('stroke', 'rgba(0,0,0,0.25)');
-                            c.setAttribute('stroke-width', '1');
-                            c.dataset.arrowIndex = String(idx);
-                            c.dataset.endpoint = endpoint;
-                            c.addEventListener('click', (e) => {
-                                // 箭头模式下也允许编辑端点
-                                e.stopPropagation();
-                                e.preventDefault();
-                                beginEditArrowEndpoint(idx, endpoint);
-                            });
-                            return c;
-                        };
-                        arrowLayer.appendChild(mkCircle(fromX, fromY, 'from'));
-                        arrowLayer.appendChild(mkCircle(toX, toY, 'to'));
-                    }
+                    // 创建箭头控件
+                    const arrowWidget = createArrowWidget(idx, p1.x, p1.y, p2.x, p2.y, arrowColor, arrowAlpha, isSelected);
+                    arrowLayer.appendChild(arrowWidget);
                 }
             });
         }
@@ -2149,25 +2225,42 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri, da
 
             const canvasRect = canvas.getBoundingClientRect();
             // 若是"初始化调用"（clientX/Y=0），则先画成固定端到当前端，避免出现 0,0 飞线
-            let x = e.clientX - canvasRect.left + canvas.scrollLeft;
-            let y = e.clientY - canvasRect.top + canvas.scrollTop;
+            let toX = e.clientX - canvasRect.left + canvas.scrollLeft;
+            let toY = e.clientY - canvasRect.top + canvas.scrollTop;
             if (!e.clientX && !e.clientY) {
                 const cur = endpoint === 'from'
                     ? getAnchorPoint(a.from.block, a.from.x, a.from.y)
                     : getAnchorPoint(a.to.block, a.to.x, a.to.y);
                 if (cur) {
-                    x = cur.x;
-                    y = cur.y;
+                    toX = cur.x;
+                    toY = cur.y;
                 } else {
-                    x = fixed.x;
-                    y = fixed.y;
+                    toX = fixed.x;
+                    toY = fixed.y;
                 }
+            }
+
+            // 计算箭头方向向量和长度
+            const dx = toX - fixed.x;
+            const dy = toY - fixed.y;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const TRIANGLE_LENGTH = 16; // 三角形长度（与 createArrowWidget 保持一致）
+
+            // 调整线条终点：真实绘制长度 = 现在的长度 - 三角形的长度
+            // 但只在编辑 'to' 端点时需要调整（因为三角形在 'to' 端）
+            let adjustedToX = toX;
+            let adjustedToY = toY;
+            if (endpoint === 'to' && length > TRIANGLE_LENGTH) {
+                const unitX = dx / length;
+                const unitY = dy / length;
+                adjustedToX = toX - unitX * TRIANGLE_LENGTH;
+                adjustedToY = toY - unitY * TRIANGLE_LENGTH;
             }
 
             endpointPreviewLine.setAttribute('x1', String(fixed.x));
             endpointPreviewLine.setAttribute('y1', String(fixed.y));
-            endpointPreviewLine.setAttribute('x2', String(x));
-            endpointPreviewLine.setAttribute('y2', String(y));
+            endpointPreviewLine.setAttribute('x2', String(adjustedToX));
+            endpointPreviewLine.setAttribute('y2', String(adjustedToY));
         }
 
         function clearArrowSelection() {
